@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 export interface RegistroVisita {
   id: number;
@@ -11,6 +12,8 @@ export interface RegistroVisita {
   fecha_hora: string;
 }
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const RUTA_DB = path.join(__dirname, '..', 'visitas_ubb.json');
 
 function leerVisitas(): RegistroVisita[] {
