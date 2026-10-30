@@ -1,129 +1,97 @@
-import sqlite3 from 'sqlite3';
-import { Pool } from 'pg';
+import fs from 'fs';
+import path from 'path';
 
-const esProduccion = !!process.env.DATABASE_URL;
-
-let pgPool: Pool | null = null;
-let sqliteDb: sqlite3.Database | null = null;
-
-if (esProduccion) {
-  pgPool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-  });
-} else {
-  sqliteDb = new sqlite3.Database('./visitas_ubb.db');
-}
-
-export const inicializarBD = async () => {
-  if (esProduccion && pgPool) {
-    await pgPool.query(`
-      CREATE TABLE IF NOT EXISTS visitas (
-        id SERIAL PRIMARY KEY,
-        poi_id VARCHAR(100) NOT NULL,
-        latitud DOUBLE PRECISION,
-        longitud DOUBLE PRECISION,
-        id_dispositivo VARCHAR(100),
-        version_app VARCHAR(50),
-        fecha_hora TIMESTAMPTZ DEFAULT NOW()
-      );
-    `);
-  } else if (sqliteDb) {
-    sqliteDb.run(`
-      CREATE TABLE IF NOT EXISTS visitas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        poi_id TEXT NOT NULL,
-        latitud REAL,
-        longitud REAL,
-        id_dispositivo TEXT,
-        version_app TEXT,
-        fecha_hora DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-  }
-};
-
-export const registrarVisitaBD = async (datos: {
+export interface RegistroVisita {
+  id: number;
   poi_id: string;
   latitud: number;
   longitud: number;
   id_dispositivo: string;
   version_app: string;
-  fecha_hora?: string;
-}) => {
-  if (esProduccion && pgPool) {
-    const consulta = `
-      INSERT INTO visitas (poi_id, latitud, longitud, id_dispositivo, version_app, fecha_hora)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING *;
-    `;
-    const res = await pgPool.query(consulta, [
-      datos.poi_id,
-      datos.latitud,
-      datos.longitud,
-      datos.id_dispositivo,
-      datos.version_app,
-      datos.fecha_hora || new Date().toISOString()
-    ]);
-    return res.rows[0];
-  } else if (sqliteDb) {
-    return new Promise((resolve, reject) => {
-      const consulta = `
-        INSERT INTO visitas (poi_id, latitud, longitud, id_dispositivo, version_app, fecha_hora)
-        VALUES (?, ?, ?, ?, ?, ?);
-      `;
-      sqliteDb!.run(
-        consulta,
-        [
-          datos.poi_id,
-          datos.latitud,
-          datos.longitud,
-          datos.id_dispositivo,
-          datos.version_app,
-          datos.fecha_hora || new Date().toISOString()
-        ],
-        function (err) {
-          if (err) reject(err);
-          else resolve({ id: this.lastID, ...datos });
-        }
-      );
-    });
-  }
-};
+  fecha_hora: string;
+}
 
-export const obtenerEstadisticas = async () => {
-  if (esProduccion && pgPool) {
-    const total = await pgPool.query(`SELECT COUNT(*) FROM visitas;`);
-    const porPoi = await pgPool.query(`
-      SELECT poi_id, COUNT(*) as cantidad 
-      FROM visitas 
-      GROUP BY poi_id 
-      ORDER BY cantidad DESC;
-    `);
-    const recientes = await pgPool.query(`
-      SELECT * FROM visitas 
-      ORDER BY fecha_hora DESC 
-      LIMIT 15;
-    `);
-    return {
-      totalVisitas: parseInt(total.rows[0].count, 10),
-      resumenPoi: porPoi.rows,
-      visitasRecientes: recientes.rows
-    };
-  } else if (sqliteDb) {
-    return new Promise((resolve, reject) => {
-      sqliteDb!.all(`SELECT poi_id, COUNT(*) as cantidad FROM visitas GROUP BY poi_id ORDER BY cantidad DESC;`, (err, porPoi) => {
-        if (err) return reject(err);
-        sqliteDb!.all(`SELECT * FROM visitas ORDER BY fecha_hora DESC LIMIT 15;`, (err2, recientes) => {
-          if (err2) return reject(err2);
-          const total = (porPoi as any[]).reduce((acum: number, actual: any) => acum + actual.cantidad, 0);
-          resolve({
-            totalVisitas: total,
-            resumenPoi: porPoi,
-            visitasRecientes: recientes
-          });
-        });
-      });
-    });
+const RUTA_DB = path.join(__dirname, '..', 'visitas_ubb.json');
+
+function leerVisitas(): RegistroVisita[] {
+  try {
+    if (!fs.existsSync(RUTA_DB)) {
+      fs.writeFileSync(RUTA_DB, JSON.stringify([], null, 2), 'utf-8');
+      return [];
+    }
+    const contenido = fs.readFileSync(RUTA_DB, 'utf-8');
+    return JSON.parse(contenido || '[]');
+  } catch (error) {
+    console.error('Error al leer base de datos:', error);
+    return [];
   }
-};
+}
+
+function guardarVisitas(visitas: RegistroVisita[]): void {
+  try {
+    fs.writeFileSync(RUTA_DB, JSON.stringify(visitas, null, 2), 'utf-8');
+  } catch (error) {
+    console.error('Error al guardar en base de datos:', error);
+  }
+}
+
+export function inicializarBD(): Promise<void> {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(RUTA_DB)) {
+      fs.writeFileSync(RUTA_DB, JSON.stringify([], null, 2), 'utf-8');
+    }
+    resolve();
+  });
+}
+
+export function registrarVisitaBD(datos: {
+  poi_id: string;
+  latitud: number;
+  longitud: number;
+  id_dispositivo: string;
+  version_app: string;
+}): Promise<RegistroVisita> {
+  return new Promise((resolve) => {
+    const visitas = leerVisitas();
+    const nuevaVisita: RegistroVisita = {
+      id: visitas.length > 0 ? visitas[visitas.length - 1].id + 1 : 1,
+      poi_id: datos.poi_id,
+      latitud: datos.latitud,
+      longitud: datos.longitud,
+      id_dispositivo: datos.id_dispositivo,
+      version_app: datos.version_app,
+      fecha_hora: new Date().toISOString()
+    };
+
+    visitas.push(nuevaVisita);
+    guardarVisitas(visitas);
+    resolve(nuevaVisita);
+  });
+}
+
+export function obtenerEstadisticas(): Promise<{
+  totalVisitas: number;
+  resumenPoi: { poi_id: string; cantidad: number }[];
+  visitasRecientes: RegistroVisita[];
+}> {
+  return new Promise((resolve) => {
+    const visitas = leerVisitas();
+
+    const mapaPois: { [key: string]: number } = {};
+    visitas.forEach((v) => {
+      mapaPois[v.poi_id] = (mapaPois[v.poi_id] || 0) + 1;
+    });
+
+    const resumenPoi = Object.keys(mapaPois)
+      .map((poi_id) => ({ poi_id, cantidad: mapaPois[poi_id] }))
+      .sort((a, b) => b.cantidad - a.cantidad);
+
+    const visitasRecientes = [...visitas].reverse().slice(0, 15);
+
+    resolve({
+      totalVisitas: visitas.length,
+      resumenPoi,
+      visitasRecientes
+    });
+  });
+}
